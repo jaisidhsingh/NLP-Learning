@@ -5,22 +5,26 @@ import math
 
 class SelfAttention(nn.Module):
     def __init__(self, embed_size, heads):
-        super(SetfAttention, self).__init__()
+        super(SelfAttention, self).__init__()
         self.heads = heads
         self.embed_size = embed_size
-        self.heads_dim = embed_size // heads
+        self.head_dims = embed_size // heads
         self.values = nn.Linear(self.head_dims, self.head_dims, bias=False)
         self.keys = nn.Linear(self.head_dims, self.head_dims, bias=False)
-        self.query = nn.Linear(self.head_dims, self.head_dims, bais=False)
-        self.fc = nn.Linear(self.embed_size, self.embed_size, bias=False)
+        self.query = nn.Linear(self.head_dims, self.head_dims, bias=False)
+        self.fc = nn.Linear(heads*self.head_dims, self.embed_size, bias=False)
         
     def forward(self, values, keys, query, mask):
         N = query.shape[0]
-        value_len, key_len, query_len = value.shape[1], keys.shape[1], query_shape[1]
+        value_len, key_len, query_len = values.shape[1], keys.shape[1], query.shape[1]
 
         values = values.reshape(N, value_len, self.heads, self.head_dims)
         keys = keys.reshape(N, key_len, self.heads, self.head_dims)
         query = query.reshape(N, query_len, self.heads, self.head_dims)
+        
+        values = self.values(values)
+        keys = self.keys(keys)
+        query = self.query(query)
         
         # required energy shape: (N, heads, query_len, key_len)
         energy = torch.einsum("nqhd,nkhd->nhqk", [query, keys])
@@ -28,7 +32,7 @@ class SelfAttention(nn.Module):
         if mask is not None:
             energy = energy.masked_fill(mask == 0, float("-1e20")) # -1e20 for numerical stability
 
-        attention = nn.softmax(energy/ (math.sqrt(self.embed_size)), dim=3)
+        attention = torch.softmax(energy/math.sqrt(self.embed_size), dim=3)
 
         # required out shape: (N, query_len, heads, head_dims)
         out = torch.einsum("nhql, nlhd-> nqhd", [attention, values]).reshape(N, query_len, self.heads*self.head_dims)
@@ -61,12 +65,12 @@ class Encoder(nn.Module):
         self.word_embedding = nn.Embedding(src_vocab_size, embed_size)
         self.positional_embedding = nn.Embedding(max_length, embed_size)
         self.layers = nn.ModuleList([TransformerBlock(embed_size, heads, dropout=dropout, forward_expansion=forward_expansion)])
-        self.dropout = nn.Embedding(dropout)
+        self.dropout = nn.Dropout(dropout)
 
     def forward(self, x, mask):
         N, seq_length = x.shape
         positions = torch.arange(0, seq_length).expand(N, seq_length).to(self.device)
-        out = self.dropout(self.word_embedding(x) + self.positional_embeddings(positions))
+        out = self.dropout(self.word_embedding(x) + self.positional_embedding(positions))
         
         for layer in self.layers:
             out = layer(out, out, out, mask)
@@ -84,13 +88,13 @@ class DecoderBlock(nn.Module):
     def forward(self, x, value, key, source_mask, target_mask):
         attention = self.attention(x, x, x, target_mask)
         query = self.dropout(self.norm(attention+x))
-        out = self.transformer_block(value, key, query, source_mask)
+        out = self.transform_block(value, key, query, source_mask)
         return out
 
 class Decoder(nn.Module):
-    def __init__(self, target_vocab_size, embed_layers, num_layers, heads, forward_expansion, dropout, device, max_length):
+    def __init__(self, target_vocab_size, embed_size, num_layers, heads, forward_expansion, dropout, device, max_length):
         super(Decoder, self).__init__()
-        self.dropout = dropout
+        self.dropout = nn.Dropout(dropout)
         self.device = device
         self.word_embedding = nn.Embedding(target_vocab_size, embed_size)
         self.positional_embedding = nn.Embedding(max_length, embed_size)
@@ -101,8 +105,9 @@ class Decoder(nn.Module):
         N, seq_length = x.shape
         positions = torch.arange(0, seq_length).expand(N, seq_length).to(self.device)
 
-        for layer in self.layer:
-            x = layer(encoder_output, encoder_output, source_mask, target_mask)
+        x = self.dropout((self.word_embedding(x) + self.positional_embedding(positions)))
+        for layer in self.layers:
+            x = layer(x, encoder_output, encoder_output, source_mask, target_mask)
         out = self.fc_out(x)
         return out
 
@@ -120,7 +125,7 @@ class Transformer(nn.Module):
         source_mask = (source != self.src_pad_idx).unsqueeze(1).unsqueeze(2) # as we require shape (N, 1, 1, source_length)
         return source_mask.to(self.device)
 
-    def grt_target_mask(self, target):
+    def get_target_mask(self, target):
         N, tgt_len = target.shape
         tgt_mask = torch.tril(torch.ones((tgt_len, tgt_len))).expand(N, 1, tgt_len, tgt_len)
         return tgt_mask.to(self.device)
@@ -131,3 +136,18 @@ class Transformer(nn.Module):
         source_thru_encoder = self.encoder(source, source_mask)
         out = self.decoder(target, source_thru_encoder, source_mask, tgt_mask)
         return out
+
+
+def test():
+   device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+   x = torch.tensor([[1, 5, 6, 4, 3, 9, 5, 2, 8], [1, 8, 7, 3, 4, 5, 6, 7, 2]]).to(device)
+   target = torch.tensor([[1, 7, 4, 3, 5, 9, 2, 0], [1, 5, 6, 2, 4, 7, 6, 2]]).to(device)
+   src_pad_idx = 0
+   tgt_pad_idx = 0
+   src_vocab_size = 10
+   tgt_vocab_size = 10
+   model = Transformer(src_vocab_size, tgt_vocab_size, src_pad_idx, tgt_pad_idx).to(device)
+   out = model(x, target[:, :-1])
+   print(out.shape)
+
+test()
